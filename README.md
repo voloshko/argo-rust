@@ -273,6 +273,92 @@ The password is a GitHub personal access token (or `gh auth token`) with `read:p
 
 ---
 
+## OpenTofu — microservice sizing
+
+Sizing (CPU/memory requests + limits, replica count, NodePort) is declared in `tofu/terraform.tfvars` and applied directly to the cluster via the Kubernetes provider. ArgoCD is configured with `ignoreDifferences` for those fields so the two tools don't fight.
+
+### Install OpenTofu
+
+```bash
+VERSION=1.11.5
+curl -fsSL "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.tar.gz" \
+  | tar -xz -C ~/bin tofu
+```
+
+### Workflow
+
+```bash
+cd tofu
+tofu init          # first time only — downloads kubernetes provider
+tofu plan          # preview changes
+tofu apply         # apply sizing to the cluster
+tofu output        # show current sizing and endpoints
+```
+
+### Changing sizing
+
+Edit `tofu/terraform.tfvars`, then run `tofu apply`:
+
+```hcl
+services = {
+  "argo-rust" = {
+    replicas = 2                                         # scale out
+    resources = {
+      requests = { cpu = "100m", memory = "64Mi" }       # bump requests
+      limits   = { cpu = "500m", memory = "128Mi" }      # bump limits
+    }
+    # ... other fields unchanged
+  }
+}
+```
+
+### Adding a new microservice
+
+Add a new entry to the `services` map in `terraform.tfvars`:
+
+```hcl
+  "my-service" = {
+    namespace = "my-service"
+    replicas  = 1
+    image     = "ghcr.io/voloshko/my-service:latest"
+    port      = 8080
+    node_port = 30801
+    probes    = { path = "/health", liveness_initial_delay = 5, liveness_period = 10,
+                  readiness_initial_delay = 3, readiness_period = 5 }
+    resources = {
+      requests = { cpu = "50m",  memory = "32Mi" }
+      limits   = { cpu = "200m", memory = "64Mi" }
+    }
+    image_pull_secret = "ghcr-secret"
+  }
+```
+
+Then create its pull secret and apply:
+
+```bash
+microk8s kubectl create secret docker-registry ghcr-secret \
+  --namespace=my-service --docker-server=ghcr.io \
+  --docker-username=voloshko --docker-password=$(gh auth token)
+tofu apply
+```
+
+### Ownership split
+
+| What | Owner | How |
+|------|-------|-----|
+| Image tag | CI (GitHub Actions) | `sed` + git commit → ArgoCD sync |
+| Replicas | OpenTofu | `terraform.tfvars` + `tofu apply` |
+| CPU / memory | OpenTofu | `terraform.tfvars` + `tofu apply` |
+| Namespace, Service | OpenTofu | managed resources |
+
+The ArgoCD Application has `ignoreDifferences` on `/spec/replicas` and `/spec/template/spec/containers/0/resources` so it never reverts what OpenTofu sets.
+
+### State file
+
+`terraform.tfstate` is excluded from git (`.gitignore`) because it can contain sensitive data. It lives only on the machine where `tofu apply` is run. For team use, configure a remote backend (e.g., S3, GCS, or Terraform Cloud) in `main.tf`.
+
+---
+
 ## Running locally
 
 ```bash
