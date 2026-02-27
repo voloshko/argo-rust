@@ -35,17 +35,15 @@ argo-rust/
 ├── Cargo.lock                    # committed (binary crate)
 ├── Dockerfile                    # multi-stage build
 ├── .github/workflows/deploy.yml  # CI/CD pipeline
-├── k8s/
-│   ├── namespace.yaml
-│   ├── deployment.yaml           # image tag updated by CI on every push
-│   └── service.yaml
-└── tofu/
-    ├── main.tf                   # kubernetes provider
-    ├── variables.tf              # services type definition
-    ├── microservices.tf          # Deployment, Service, Ingress resources
-    ├── outputs.tf
-    └── terraform.tfvars          # per-service sizing + hostnames
+└── k8s/
+    ├── namespace.yaml
+    ├── deployment.yaml           # image tag updated by CI on every push
+    └── service.yaml
 ```
+
+**Infrastructure management** (sizing, ingress, replicas) is handled by the central **k8s-infra** repository.
+
+See: https://github.com/voloshko/k8s-infra
 
 ---
 
@@ -308,7 +306,7 @@ server:
 EOF
 ```
 
-The Ingress is created once and not managed by ArgoCD or OpenTofu (ArgoCD can't manage its own Ingress; OpenTofu's `services` map targets app deployments, not cluster infrastructure):
+The Ingress is created once and not managed by ArgoCD or k8s-infra (ArgoCD can't manage its own Ingress; k8s-infra's `services` map targets app deployments, not cluster infrastructure):
 
 ```bash
 microk8s kubectl apply -f - <<'EOF'
@@ -534,7 +532,7 @@ nginx Ingress Controller (DaemonSet — one pod per node)
 | `default-addresspool` | IPAddressPool | `metallb-system` | Range 192.168.1.200–192.168.1.210 |
 | `ingress-lb` | Service (LoadBalancer) | `ingress` | MetalLB VIP 192.168.1.200, targets nginx DaemonSet |
 | nginx Ingress controller | DaemonSet | `ingress` | Installed via `microk8s enable ingress`; runs on every node |
-| `argo-rust` Ingress | Ingress | `argo-rust` | `ingressClassName: public`, routes rust.voloshko.org → service:80; managed by OpenTofu |
+| `argo-rust` Ingress | Ingress | `argo-rust` | `ingressClassName: public`, routes rust.voloshko.org → service:80; managed by k8s-infra |
 | argo-rust pods | Deployment (2 replicas) | `argo-rust` | Pod anti-affinity ensures one pod per node |
 
 ### MetalLB — how VIP failover works
@@ -543,7 +541,7 @@ MetalLB uses L2 mode: one node "owns" the VIP at any moment and responds to ARP 
 
 ### Ingress resource
 
-Ingress resources are managed by OpenTofu (not ArgoCD). Add a `hostname` field to a service entry in `tofu/terraform.tfvars` and run `tofu apply` — OpenTofu creates (or updates) the Ingress automatically:
+Ingress resources are managed by k8s-infra (not ArgoCD). Add a `hostname` field to a service entry in `k8s-infra/terraform.tfvars` and run `tofu apply` — k8s-infra creates (or updates) the Ingress automatically:
 
 ```hcl
 "argo-rust" = {
@@ -556,7 +554,7 @@ The generated Ingress uses `ingressClassName: public` and routes all paths (`/`)
 
 ### Pod spreading
 
-OpenTofu sets `replicas: 2` and a `podAntiAffinity` rule with `topologyKey: kubernetes.io/hostname`. This tells the scheduler to prefer placing pods on different nodes. The rule is `preferredDuringScheduling` so the deployment still starts on a single-node cluster.
+k8s-infra sets `replicas: 2` and a `podAntiAffinity` rule with `topologyKey: kubernetes.io/hostname`. This tells the scheduler to prefer placing pods on different nodes. The rule is `preferredDuringScheduling` so the deployment still starts on a single-node cluster.
 
 ### Cloudflare Tunnel — origin update
 
@@ -606,7 +604,7 @@ spec:
 EOF
 ```
 
-Everything in `k8s/` is managed by ArgoCD and applied automatically on every push to master. Ingress resources are managed separately by OpenTofu (see the OpenTofu section below).
+Everything in `k8s/` is managed by ArgoCD and applied automatically on every push to master. Ingress resources are managed separately by k8s-infra (see the Infrastructure Management section).
 
 ---
 
@@ -669,101 +667,36 @@ The password is a GitHub personal access token (or `gh auth token`) with `read:p
 
 ---
 
-## OpenTofu — microservice sizing
+## Infrastructure Management
 
-Sizing (CPU/memory requests + limits, replica count, NodePort) is declared in `tofu/terraform.tfvars` and applied directly to the cluster via the Kubernetes provider. ArgoCD is configured with `ignoreDifferences` for those fields so the two tools don't fight.
+**Sizing, replicas, ingress, and NodePort configuration** are managed in the central **k8s-infra** repository:
 
-### Install OpenTofu
+📁 **Repository**: https://github.com/voloshko/k8s-infra
 
-```bash
-VERSION=1.11.5
-curl -fsSL "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.tar.gz" \
-  | tar -xz -C ~/bin tofu
-```
+### What's Managed Where
 
-### Workflow
+| Resource | Managed By | Location |
+|----------|------------|----------|
+| Image tag | CI (GitHub Actions) | `k8s/deployment.yaml` (this repo) |
+| Replicas | k8s-infra (OpenTofu) | `k8s-infra/terraform.tfvars` |
+| CPU/memory | k8s-infra (OpenTofu) | `k8s-infra/terraform.tfvars` |
+| Namespace | k8s-infra (OpenTofu) | `k8s-infra/terraform.tfvars` |
+| Service | k8s-infra (OpenTofu) | `k8s-infra/terraform.tfvars` |
+| Ingress | k8s-infra (OpenTofu) | `k8s-infra/terraform.tfvars` |
 
-```bash
-cd tofu
-tofu init          # first time only — downloads kubernetes provider
-tofu plan          # preview changes
-tofu apply         # apply sizing to the cluster
-tofu output        # show current sizing and endpoints
-```
+### Changing Sizing
 
-### Changing sizing
-
-Edit `tofu/terraform.tfvars`, then run `tofu apply`:
-
-```hcl
-services = {
-  "argo-rust" = {
-    replicas = 2                                         # scale out
-    resources = {
-      requests = { cpu = "100m", memory = "64Mi" }       # bump requests
-      limits   = { cpu = "500m", memory = "128Mi" }      # bump limits
-    }
-    # ... other fields unchanged
-  }
-}
-```
-
-### Adding a new microservice
-
-Add a new entry to the `services` map in `terraform.tfvars`:
-
-```hcl
-  "my-service" = {
-    namespace = "my-service"
-    hostname  = "api.voloshko.org"    # optional — omit if no public hostname needed
-    replicas  = 1
-    image     = "ghcr.io/voloshko/my-service:latest"
-    port      = 8080
-    node_port = 30801
-    probes    = { path = "/health", liveness_initial_delay = 5, liveness_period = 10,
-                  readiness_initial_delay = 3, readiness_period = 5 }
-    resources = {
-      requests = { cpu = "50m",  memory = "32Mi" }
-      limits   = { cpu = "200m", memory = "64Mi" }
-    }
-    image_pull_secret = "ghcr-secret"
-  }
-```
-
-Then create its pull secret and apply:
+To scale the service or change resource limits:
 
 ```bash
-microk8s kubectl create secret docker-registry ghcr-secret \
-  --namespace=my-service --docker-server=ghcr.io \
-  --docker-username=voloshko --docker-password=$(gh auth token)
+cd ~/projects/k8s-infra
+vim terraform.tfvars    # Edit replicas, resources, etc.
 tofu apply
 ```
 
-When `hostname` is set, `tofu apply` creates a `kubernetes_ingress_v1` that routes `api.voloshko.org` through the nginx Ingress (MetalLB VIP 192.168.1.200) to the service on port 80. The `tofu output` command will show `https://api.voloshko.org` as the endpoint.
+### Adding a New Service
 
-To expose the hostname publicly, add a **Public Hostname** entry in the Cloudflare Zero Trust tunnel config:
-
-| Hostname | Service (origin) |
-|----------|-----------------|
-| `api.voloshko.org` | `http://192.168.1.200` |
-
-No NodePort or DNS changes needed — nginx routes by the `Host` header.
-
-### Ownership split
-
-| What | Owner | How |
-|------|-------|-----|
-| Image tag | CI (GitHub Actions) | `sed` + git commit → ArgoCD sync |
-| Replicas | OpenTofu | `terraform.tfvars` + `tofu apply` |
-| CPU / memory | OpenTofu | `terraform.tfvars` + `tofu apply` |
-| Namespace, Service | OpenTofu | managed resources |
-| Ingress (public hostname) | OpenTofu | `hostname` field in `terraform.tfvars` + `tofu apply` |
-
-The ArgoCD Application has `ignoreDifferences` on `/spec/replicas` and `/spec/template/spec/containers/0/resources` so it never reverts what OpenTofu sets. Tofu-managed Ingress resources carry `argocd.argoproj.io/sync-options: Prune=false` so ArgoCD never deletes them.
-
-### State file
-
-`terraform.tfstate` is excluded from git (`.gitignore`) because it can contain sensitive data. It lives only on the machine where `tofu apply` is run. For team use, configure a remote backend (e.g., S3, GCS, or Terraform Cloud) in `main.tf`.
+See the [k8s-infra README](https://github.com/voloshko/k8s-infra) for complete documentation on adding new microservices.
 
 ---
 
