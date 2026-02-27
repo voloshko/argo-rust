@@ -258,20 +258,26 @@ ArgoCD is running in the `argocd` namespace on the same MicroK8s cluster.
 | Public (Cloudflare) | `https://argo.voloshko.org` |
 | LAN NodePort | `http://192.168.1.187:32505` |
 
+> **Note**: Local access is HTTP (not HTTPS) because the server runs in insecure mode. The old `https://192.168.1.187:32505` URL no longer works.
+
 ### Public access via nginx Ingress
 
 ArgoCD is exposed through the same MetalLB VIP + nginx Ingress used by other services. The server runs in **insecure mode** (HTTP only) so nginx can proxy it without TLS re-encryption; Cloudflare provides the public HTTPS termination.
 
-**Insecure mode** is set permanently in the Helm values:
+The full set of user-supplied Helm values (insecure mode + NodePort preservation):
 
 ```yaml
-# tofu/argocd-values-note: applied via helm upgrade
 configs:
   params:
     server.insecure: true
+server:
+  service:
+    type: NodePort
+    nodePortHttp: 32505
+    nodePortHttps: 31340
 ```
 
-Applied with:
+Applied with (or re-applied after any chart upgrade):
 
 ```bash
 microk8s helm3 upgrade argo-cd argo-cd \
@@ -282,6 +288,11 @@ microk8s helm3 upgrade argo-cd argo-cd \
 configs:
   params:
     server.insecure: true
+server:
+  service:
+    type: NodePort
+    nodePortHttp: 32505
+    nodePortHttps: 31340
 EOF
 ```
 
