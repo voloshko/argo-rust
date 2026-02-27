@@ -168,7 +168,7 @@ jobs:
             }
 
             // Use PR head SHA instead of context.sha for PR workflows
-            const sha = context.event.pull_request
+            const sha = context.payload.pull_request
               ? context.payload.pull_request.head.sha
               : context.sha;
 
