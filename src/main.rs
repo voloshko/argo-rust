@@ -2,19 +2,30 @@ use axum::{extract::Path, routing::get, Json, Router};
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct HelloResponse { message: String }
+struct HelloResponse {
+    message: String,
+}
 
 #[derive(Serialize)]
-struct FibResponse { n: u64, result: u64 }
+struct FibResponse {
+    n: u64,
+    result: u64,
+}
 
 async fn hello() -> Json<HelloResponse> {
-    Json(HelloResponse { message: "Hello World".to_string() })
+    Json(HelloResponse {
+        message: "Hello World!!!".to_string(),
+    })
 }
 
 async fn fibonacci(Path(n): Path<u64>) -> Json<FibResponse> {
-    let result = if n == 0 { 0 } else {
+    let result = if n == 0 {
+        0
+    } else {
         let (mut a, mut b) = (0u64, 1u64);
-        for _ in 1..n { (a, b) = (b, a.saturating_add(b)); }
+        for _ in 1..n {
+            (a, b) = (b, a.saturating_add(b));
+        }
         b
     };
     Json(FibResponse { n, result })
