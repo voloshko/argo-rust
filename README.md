@@ -33,10 +33,16 @@ argo-rust/
 ├── Cargo.lock                    # committed (binary crate)
 ├── Dockerfile                    # multi-stage build
 ├── .github/workflows/deploy.yml  # CI/CD pipeline
-└── k8s/
-    ├── namespace.yaml
-    ├── deployment.yaml           # image tag updated by CI on every push
-    └── service.yaml
+├── k8s/
+│   ├── namespace.yaml
+│   ├── deployment.yaml           # image tag updated by CI on every push
+│   └── service.yaml
+└── tofu/
+    ├── main.tf                   # kubernetes provider
+    ├── variables.tf              # services type definition
+    ├── microservices.tf          # Deployment, Service, Ingress resources
+    ├── outputs.tf
+    └── terraform.tfvars          # per-service sizing + hostnames
 ```
 
 ---
@@ -354,7 +360,7 @@ argo-rust ClusterIP Service
 | `default-addresspool` | IPAddressPool | `metallb-system` | Range 192.168.1.200–192.168.1.210 |
 | `ingress-lb` | Service (LoadBalancer) | `ingress` | MetalLB VIP 192.168.1.200, targets nginx DaemonSet |
 | nginx Ingress controller | DaemonSet | `ingress` | Installed via `microk8s enable ingress`; runs on every node |
-| `argo-rust` Ingress | Ingress | `argo-rust` | `ingressClassName: public`, routes rust.voloshko.org → service:80 |
+| `argo-rust` Ingress | Ingress | `argo-rust` | `ingressClassName: public`, routes rust.voloshko.org → service:80; managed by OpenTofu |
 | argo-rust pods | Deployment (2 replicas) | `argo-rust` | Pod anti-affinity ensures one pod per node |
 
 ### MetalLB — how VIP failover works
@@ -363,19 +369,16 @@ MetalLB uses L2 mode: one node "owns" the VIP at any moment and responds to ARP 
 
 ### Ingress resource
 
-`k8s/ingress.yaml` — managed by ArgoCD:
+Ingress resources are managed by OpenTofu (not ArgoCD). Add a `hostname` field to a service entry in `tofu/terraform.tfvars` and run `tofu apply` — OpenTofu creates (or updates) the Ingress automatically:
 
-```yaml
-ingressClassName: public
-rules:
-  - host: rust.voloshko.org
-    http:
-      paths:
-        - path: /
-          pathType: Prefix
-          backend:
-            service: { name: argo-rust, port: 80 }
+```hcl
+"argo-rust" = {
+  hostname  = "rust.voloshko.org"   # ← nginx Ingress created automatically
+  # ... other fields
+}
 ```
+
+The generated Ingress uses `ingressClassName: public` and routes all paths (`/`) to the service on port 80. It also carries an `argocd.argoproj.io/sync-options: Prune=false` annotation so ArgoCD ignores it.
 
 ### Pod spreading
 
@@ -424,7 +427,7 @@ spec:
 EOF
 ```
 
-Everything in `k8s/` (including `ingress.yaml`) is managed by ArgoCD and applied automatically on every push to master.
+Everything in `k8s/` is managed by ArgoCD and applied automatically on every push to master. Ingress resources are managed separately by OpenTofu (see the OpenTofu section below).
 
 ---
 
@@ -533,6 +536,7 @@ Add a new entry to the `services` map in `terraform.tfvars`:
 ```hcl
   "my-service" = {
     namespace = "my-service"
+    hostname  = "api.voloshko.org"    # optional — omit if no public hostname needed
     replicas  = 1
     image     = "ghcr.io/voloshko/my-service:latest"
     port      = 8080
@@ -556,6 +560,16 @@ microk8s kubectl create secret docker-registry ghcr-secret \
 tofu apply
 ```
 
+When `hostname` is set, `tofu apply` creates a `kubernetes_ingress_v1` that routes `api.voloshko.org` through the nginx Ingress (MetalLB VIP 192.168.1.200) to the service on port 80. The `tofu output` command will show `https://api.voloshko.org` as the endpoint.
+
+To expose the hostname publicly, add a **Public Hostname** entry in the Cloudflare Zero Trust tunnel config:
+
+| Hostname | Service (origin) |
+|----------|-----------------|
+| `api.voloshko.org` | `http://192.168.1.200` |
+
+No NodePort or DNS changes needed — nginx routes by the `Host` header.
+
 ### Ownership split
 
 | What | Owner | How |
@@ -564,8 +578,9 @@ tofu apply
 | Replicas | OpenTofu | `terraform.tfvars` + `tofu apply` |
 | CPU / memory | OpenTofu | `terraform.tfvars` + `tofu apply` |
 | Namespace, Service | OpenTofu | managed resources |
+| Ingress (public hostname) | OpenTofu | `hostname` field in `terraform.tfvars` + `tofu apply` |
 
-The ArgoCD Application has `ignoreDifferences` on `/spec/replicas` and `/spec/template/spec/containers/0/resources` so it never reverts what OpenTofu sets.
+The ArgoCD Application has `ignoreDifferences` on `/spec/replicas` and `/spec/template/spec/containers/0/resources` so it never reverts what OpenTofu sets. Tofu-managed Ingress resources carry `argocd.argoproj.io/sync-options: Prune=false` so ArgoCD never deletes them.
 
 ### State file
 
