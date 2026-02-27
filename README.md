@@ -252,7 +252,72 @@ strip = true      # strip debug symbols from binary
 ## ArgoCD configuration
 
 ArgoCD is running in the `argocd` namespace on the same MicroK8s cluster.
-UI: `https://192.168.1.187:32505`
+
+| Access method | URL |
+|---------------|-----|
+| Public (Cloudflare) | `https://argo.voloshko.org` |
+| LAN NodePort | `http://192.168.1.187:32505` |
+
+### Public access via nginx Ingress
+
+ArgoCD is exposed through the same MetalLB VIP + nginx Ingress used by other services. The server runs in **insecure mode** (HTTP only) so nginx can proxy it without TLS re-encryption; Cloudflare provides the public HTTPS termination.
+
+**Insecure mode** is set permanently in the Helm values:
+
+```yaml
+# tofu/argocd-values-note: applied via helm upgrade
+configs:
+  params:
+    server.insecure: true
+```
+
+Applied with:
+
+```bash
+microk8s helm3 upgrade argo-cd argo-cd \
+  --repo https://argoproj.github.io/argo-helm \
+  --namespace argocd \
+  --reuse-values \
+  -f - <<'EOF'
+configs:
+  params:
+    server.insecure: true
+EOF
+```
+
+The Ingress is created once and not managed by ArgoCD or OpenTofu (ArgoCD can't manage its own Ingress; OpenTofu's `services` map targets app deployments, not cluster infrastructure):
+
+```bash
+microk8s kubectl apply -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-server
+  namespace: argocd
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
+    argocd.argoproj.io/sync-options: "Prune=false"
+spec:
+  ingressClassName: public
+  rules:
+    - host: argo.voloshko.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argo-cd-argocd-server
+                port:
+                  number: 80
+EOF
+```
+
+The 300 s proxy timeouts accommodate slow ArgoCD sync operations. `Prune=false` prevents ArgoCD from deleting its own Ingress.
+
+The Cloudflare tunnel has a public hostname entry: `argo.voloshko.org` → `http://192.168.1.200`.
 
 ### Application manifest
 
