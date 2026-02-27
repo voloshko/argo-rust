@@ -8,7 +8,7 @@ struct HelloResponse { message: String }
 struct FibResponse { n: u64, result: u64 }
 
 async fn hello() -> Json<HelloResponse> {
-    Json(HelloResponse { message: "Hello from argo-rust!".to_string() })
+    Json(HelloResponse { message: "Hello Dennis!!!".to_string() })
 }
 
 async fn fibonacci(Path(n): Path<u64>) -> Json<FibResponse> {
