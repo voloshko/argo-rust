@@ -17,7 +17,7 @@ spec:
         - name: ghcr-secret
       containers:
         - name: argo-rust
-          image: ghcr.io/voloshko/argo-rust:sha-0048053
+          image: ghcr.io/voloshko/argo-rust:sha-61933c0
           ports:
             - containerPort: 8080
           resources:
