@@ -4,7 +4,7 @@ output "services" {
     for k, v in var.services : k => {
       namespace = v.namespace
       replicas  = v.replicas
-      endpoint  = "http://192.168.1.187:${v.node_port}"
+      endpoint  = v.hostname != null ? "https://${v.hostname}" : "http://192.168.1.187:${v.node_port}"
       resources = v.resources
     }
   }

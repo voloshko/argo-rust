@@ -125,6 +125,46 @@ resource "kubernetes_service_v1" "service" {
   }
 }
 
+# ── Ingress ───────────────────────────────────────────────────────────────────
+resource "kubernetes_ingress_v1" "service" {
+  for_each = { for k, v in var.services : k => v if v.hostname != null }
+
+  depends_on = [kubernetes_namespace_v1.service]
+
+  metadata {
+    name      = each.key
+    namespace = each.value.namespace
+    annotations = {
+      "nginx.ingress.kubernetes.io/proxy-read-timeout" = "60"
+      "nginx.ingress.kubernetes.io/proxy-send-timeout" = "60"
+      # Prevent ArgoCD from pruning this resource — tofu owns it, not git
+      "argocd.argoproj.io/sync-options" = "Prune=false"
+    }
+  }
+
+  spec {
+    ingress_class_name = "public"
+
+    rule {
+      host = each.value.hostname
+      http {
+        path {
+          path      = "/"
+          path_type = "Prefix"
+          backend {
+            service {
+              name = each.key
+              port {
+                number = 80
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 # ── Image pull secrets ────────────────────────────────────────────────────────
 # The ghcr-secret is created once out-of-band and NOT managed by OpenTofu.
 # Reading it via a data source would expose the token in terraform.tfstate.

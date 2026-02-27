@@ -20,6 +20,7 @@ services = {
       limits   = { cpu = "200m", memory = "64Mi" }
     }
 
+    hostname            = "rust.voloshko.org"
     image_pull_secret   = "ghcr-secret"
     spread_across_nodes = true
   }
