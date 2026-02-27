@@ -323,6 +323,111 @@ argocd app sync argo-rust
 
 ---
 
+## Gateway and load balancing
+
+Traffic enters from Cloudflare and is distributed across two physical nodes (**k8plus** and **dell**) via MetalLB + nginx Ingress.
+
+```
+Internet
+    │  HTTPS
+    ▼
+Cloudflare (rust.voloshko.org)
+    │  Cloudflare Tunnel (cloudflared on k8plus)
+    ▼
+MetalLB VIP  192.168.1.200:80
+    │  L2 advertisement on LAN — either node can own the VIP
+    ▼
+nginx Ingress Controller (DaemonSet — one pod per node)
+    │  routes Host: rust.voloshko.org → argo-rust Service
+    ▼
+argo-rust ClusterIP Service
+    │  kube-proxy round-robins across healthy endpoints
+    ├──▶ pod on k8plus  (192.168.1.171)
+    └──▶ pod on dell    (192.168.1.187)
+```
+
+### Components
+
+| Component | Kind | Namespace | Notes |
+|-----------|------|-----------|-------|
+| MetalLB controller + speaker | DaemonSet | `metallb-system` | Installed via `microk8s enable metallb:192.168.1.200-192.168.1.210` |
+| `default-addresspool` | IPAddressPool | `metallb-system` | Range 192.168.1.200–192.168.1.210 |
+| `ingress-lb` | Service (LoadBalancer) | `ingress` | MetalLB VIP 192.168.1.200, targets nginx DaemonSet |
+| nginx Ingress controller | DaemonSet | `ingress` | Installed via `microk8s enable ingress`; runs on every node |
+| `argo-rust` Ingress | Ingress | `argo-rust` | `ingressClassName: public`, routes rust.voloshko.org → service:80 |
+| argo-rust pods | Deployment (2 replicas) | `argo-rust` | Pod anti-affinity ensures one pod per node |
+
+### MetalLB — how VIP failover works
+
+MetalLB uses L2 mode: one node "owns" the VIP at any moment and responds to ARP requests for 192.168.1.200. If that node goes down, MetalLB re-announces the VIP from another node within a few seconds. Because the nginx Ingress DaemonSet runs on every node, the new VIP owner already has a healthy ingress pod.
+
+### Ingress resource
+
+`k8s/ingress.yaml` — managed by ArgoCD:
+
+```yaml
+ingressClassName: public
+rules:
+  - host: rust.voloshko.org
+    http:
+      paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service: { name: argo-rust, port: 80 }
+```
+
+### Pod spreading
+
+OpenTofu sets `replicas: 2` and a `podAntiAffinity` rule with `topologyKey: kubernetes.io/hostname`. This tells the scheduler to prefer placing pods on different nodes. The rule is `preferredDuringScheduling` so the deployment still starts on a single-node cluster.
+
+### Cloudflare Tunnel — origin update
+
+The tunnel uses token mode (configured in the Cloudflare Zero Trust dashboard). After adding MetalLB, update the public hostname origin:
+
+1. Go to [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks → Tunnels**
+2. Find the tunnel running on k8plus → **Edit**
+3. On the **Public Hostnames** tab, find `rust.voloshko.org`
+4. Change the **Service** (origin) from `http://192.168.1.187:30800` to `http://192.168.1.200`
+5. Save — traffic now routes through the MetalLB VIP
+
+The NodePort 30800 remains available for direct LAN access.
+
+### Infrastructure setup (one-time)
+
+These commands are run once on the k8plus node and are **not** managed by ArgoCD:
+
+```bash
+# 1. Install MetalLB with LAN IP pool
+microk8s enable metallb:192.168.1.200-192.168.1.210
+
+# 2. Install nginx Ingress (DaemonSet on every node)
+microk8s enable ingress
+
+# 3. Create LoadBalancer Service so MetalLB assigns a VIP to the ingress
+microk8s kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-lb
+  namespace: ingress
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: 192.168.1.200
+spec:
+  type: LoadBalancer
+  selector:
+    name: nginx-ingress-microk8s
+  externalTrafficPolicy: Local
+  ports:
+    - { name: http,  port: 80,  targetPort: 80  }
+    - { name: https, port: 443, targetPort: 443 }
+EOF
+```
+
+Everything in `k8s/` (including `ingress.yaml`) is managed by ArgoCD and applied automatically on every push to master.
+
+---
+
 ## Kubernetes resources
 
 ### Namespace
