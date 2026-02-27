@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argo-rust
+  namespace: argo-rust
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: argo-rust
+  template:
+    metadata:
+      labels:
+        app: argo-rust
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: argo-rust
+          image: ghcr.io/voloshko/argo-rust:latest
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /hello
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /hello
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
