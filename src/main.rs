@@ -14,7 +14,7 @@ struct FibResponse {
 
 async fn hello() -> Json<HelloResponse> {
     Json(HelloResponse {
-        message: "Hello World!!!".to_string(),
+        message: "Hello Dennis!".to_string(),
     })
 }
 
