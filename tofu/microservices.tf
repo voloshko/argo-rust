@@ -26,6 +26,25 @@ resource "kubernetes_deployment_v1" "service" {
       }
 
       spec {
+        dynamic "affinity" {
+          for_each = each.value.spread_across_nodes ? [1] : []
+          content {
+            pod_anti_affinity {
+              # Prefer to schedule each pod on a different node.
+              # "preferred" so the deployment still works on a single-node cluster.
+              preferred_during_scheduling_ignored_during_execution {
+                weight = 100
+                pod_affinity_term {
+                  label_selector {
+                    match_labels = { app = each.key }
+                  }
+                  topology_key = "kubernetes.io/hostname"
+                }
+              }
+            }
+          }
+        }
+
         dynamic "image_pull_secrets" {
           for_each = each.value.image_pull_secret != null ? [1] : []
           content {

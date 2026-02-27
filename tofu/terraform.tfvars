@@ -1,7 +1,7 @@
 services = {
   "argo-rust" = {
     namespace = "argo-rust"
-    replicas  = 1
+    replicas  = 2
     # image is set here only for first apply; CI updates it via ArgoCD after that
     image     = "ghcr.io/voloshko/argo-rust:latest"
     port      = 8080
@@ -20,6 +20,7 @@ services = {
       limits   = { cpu = "200m", memory = "64Mi" }
     }
 
-    image_pull_secret = "ghcr-secret"
+    image_pull_secret   = "ghcr-secret"
+    spread_across_nodes = true
   }
 }

@@ -21,6 +21,7 @@ variable "services" {
       limits   = object({ cpu = string, memory = string })
     })
 
-    image_pull_secret = optional(string, "ghcr-secret")
+    image_pull_secret    = optional(string, "ghcr-secret")
+    spread_across_nodes  = optional(bool, false)
   }))
 }

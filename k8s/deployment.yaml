@@ -4,7 +4,7 @@ metadata:
   name: argo-rust
   namespace: argo-rust
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: argo-rust
