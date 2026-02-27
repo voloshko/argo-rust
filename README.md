@@ -10,10 +10,10 @@ A Rust REST API deployed via a full GitOps loop: GitHub Actions builds and pushe
 | GET | `/fibonacci/{n}` | Returns the nth Fibonacci number |
 
 ```
-$ curl http://192.168.1.187:30800/hello
+$ curl http://192.168.1.171:30800/hello
 {"message":"Hello from argo-rust!"}
 
-$ curl http://192.168.1.187:30800/fibonacci/10
+$ curl http://192.168.1.242:30800/fibonacci/10
 {"n":10,"result":55}
 ```
 
@@ -21,8 +21,10 @@ $ curl http://192.168.1.187:30800/fibonacci/10
 
 - **Runtime**: axum 0.8 + tokio (async Rust HTTP server)
 - **Image registry**: ghcr.io/voloshko/argo-rust
-- **Kubernetes**: MicroK8s, namespace `argo-rust`, NodePort 30800
-- **GitOps**: ArgoCD with automated sync
+- **Kubernetes**: MicroK8s (2-node cluster: k8plus `192.168.1.171`, dell `192.168.1.242`)
+- **Namespace**: `argo-rust`, NodePort 30800
+- **GitOps**: ArgoCD with automated sync and HA (2 replicas)
+- **Ingress**: MetalLB VIP `192.168.1.200` + nginx Ingress Controller
 
 ## Repository layout
 
@@ -251,14 +253,24 @@ strip = true      # strip debug symbols from binary
 
 ## ArgoCD configuration
 
-ArgoCD is running in the `argocd` namespace on the same MicroK8s cluster.
+ArgoCD is running in the `argocd` namespace on the same MicroK8s cluster with **high availability** (2 replicas spread across both nodes).
 
 | Access method | URL |
 |---------------|-----|
 | Public (Cloudflare) | `https://argo.voloshko.org` |
-| LAN NodePort | `http://192.168.1.187:32505` |
+| LAN NodePort (k8plus) | `http://192.168.1.171:32505` |
+| LAN NodePort (dell) | `http://192.168.1.242:32505` |
 
-> **Note**: Local access is HTTP (not HTTPS) because the server runs in insecure mode. The old `https://192.168.1.187:32505` URL no longer works.
+> **Note**: Local access is HTTP (not HTTPS) because the server runs in insecure mode. Use `https://argo.voloshko.org` for production access.
+
+### Cluster nodes
+
+| Node | LAN IP | Role | ArgoCD Server Pod |
+|------|--------|------|-------------------|
+| k8plus | `192.168.1.171` | Control plane + worker | ✅ Running |
+| dell | `192.168.1.242` | Worker | ✅ Running |
+
+Both nodes use direct LAN connectivity (no VPN) to avoid VXLAN MTU issues.
 
 ### Public access via nginx Ingress
 
@@ -403,6 +415,87 @@ microk8s kubectl annotate application argo-rust \
 argocd app sync argo-rust
 ```
 
+### High availability configuration
+
+ArgoCD server runs with 2 replicas using pod anti-affinity to ensure pods are spread across both nodes:
+
+```yaml
+server:
+  replicas: 2
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: argocd-server
+          topologyKey: kubernetes.io/hostname
+```
+
+The deployment was patched to remove the default `nodeSelector` that was pinning pods to a single node:
+
+```bash
+# Remove nodeSelector to allow scheduling on any node
+microk8s kubectl patch deployment -n argocd argo-cd-argocd-server \
+  -p '{"spec":{"template":{"spec":{"nodeSelector":null}}}}'
+```
+
+### Storage architecture
+
+ArgoCD does **not** use persistent volumes. All state is either:
+
+| Component | Storage | Behavior |
+|-----------|---------|----------|
+| argocd-server | `emptyDir` | Stateless - serves UI/API only |
+| repo-server | `emptyDir` | Clones git on startup - rebuildable |
+| application-controller | None | Reconciles from git + k8s API |
+| redis | `emptyDir` | Cache only - rebuilt on restart |
+
+**No PVCs are required** - the source of truth is the git repository and the Kubernetes cluster itself. If a pod dies, it restarts and resyncs from git.
+
+### Troubleshooting
+
+#### Browser shows "Connection refused" but incognito works
+
+This is a browser HSTS cache issue. The browser remembers an old HTTPS redirect.
+
+**Fix**: Clear HSTS data for the IP/domain
+```
+Chrome/Edge: chrome://net-internals/#hsts → Delete domain security policies
+Firefox: Clear Site Data from address bar lock icon
+```
+
+Or use the public HTTPS URL: `https://argo.voloshko.org`
+
+#### ArgoCD pods stuck on one node
+
+If pods don't spread across nodes, check for leftover `nodeSelector`:
+
+```bash
+# Check for node selector
+microk8s kubectl get deployment -n argocd argo-cd-argocd-server \
+  -o jsonpath='{.spec.template.spec.nodeSelector}'
+
+# Remove it if present
+microk8s kubectl patch deployment -n argocd argo-cd-argocd-server \
+  -p '{"spec":{"template":{"spec":{"nodeSelector":null}}}}'
+
+# Delete pods to reschedule
+microk8s kubectl delete pod -n argocd -l app.kubernetes.io/name=argocd-server
+```
+
+#### Node IPs showing VPN addresses instead of LAN
+
+If `kubectl get nodes -o wide` shows VPN IPs (e.g., `100.124.x.x`) instead of LAN IPs:
+
+```bash
+# On each node, stop MicroK8s and add LAN IP to kubelet
+sudo microk8s stop
+echo "--node-ip=<LAN_IP>" | sudo tee -a /var/snap/microk8s/current/args/kubelet
+sudo microk8s start
+```
+
+Replace `<LAN_IP>` with the actual LAN IP (e.g., `192.168.1.171` for k8plus).
+
 ---
 
 ## Gateway and load balancing
@@ -413,20 +506,25 @@ Traffic enters from Cloudflare and is distributed across two physical nodes (**k
 Internet
     │  HTTPS
     ▼
-Cloudflare (rust.voloshko.org)
+Cloudflare (argo.voloshko.org, rust.voloshko.org)
     │  Cloudflare Tunnel (cloudflared on k8plus)
     ▼
 MetalLB VIP  192.168.1.200:80
     │  L2 advertisement on LAN — either node can own the VIP
     ▼
 nginx Ingress Controller (DaemonSet — one pod per node)
-    │  routes Host: rust.voloshko.org → argo-rust Service
+    │  routes by Host header → respective Service
     ▼
-argo-rust ClusterIP Service
-    │  kube-proxy round-robins across healthy endpoints
+┌─────────────────────────────────────────────────────────────┐
+│  ArgoCD: argo-cd-argocd-server (2 replicas, HA)             │
+│  App:    argo-rust (2 replicas, pod anti-affinity)          │
+└─────────────────────────────────────────────────────────────┘
+    │
     ├──▶ pod on k8plus  (192.168.1.171)
-    └──▶ pod on dell    (192.168.1.187)
+    └──▶ pod on dell    (192.168.1.242)
 ```
+
+**Important**: Both nodes use direct LAN connectivity. VPN (Tailscale/WireGuard) has been disabled to avoid VXLAN MTU issues.
 
 ### Components
 
@@ -462,15 +560,20 @@ OpenTofu sets `replicas: 2` and a `podAntiAffinity` rule with `topologyKey: kube
 
 ### Cloudflare Tunnel — origin update
 
-The tunnel uses token mode (configured in the Cloudflare Zero Trust dashboard). After adding MetalLB, update the public hostname origin:
+The tunnel uses token mode (configured in the Cloudflare Zero Trust dashboard). After adding MetalLB, update the public hostname origins:
 
 1. Go to [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks → Tunnels**
 2. Find the tunnel running on k8plus → **Edit**
-3. On the **Public Hostnames** tab, find `rust.voloshko.org`
-4. Change the **Service** (origin) from `http://192.168.1.187:30800` to `http://192.168.1.200`
-5. Save — traffic now routes through the MetalLB VIP
+3. On the **Public Hostnames** tab, configure:
 
-The NodePort 30800 remains available for direct LAN access.
+| Hostname | Service (origin) |
+|----------|------------------|
+| `argo.voloshko.org` | `http://192.168.1.200` |
+| `rust.voloshko.org` | `http://192.168.1.200` |
+
+4. Save — traffic now routes through the MetalLB VIP
+
+The nginx Ingress controller routes traffic to the correct service based on the `Host` header. NodePorts remain available for direct LAN access if needed.
 
 ### Infrastructure setup (one-time)
 
@@ -689,7 +792,11 @@ microk8s kubectl rollout status deployment/argo-rust -n argo-rust
 microk8s kubectl get deployment argo-rust -n argo-rust \
   -o jsonpath='{.spec.template.spec.containers[0].image}'
 
-# Hit the live endpoint
-curl http://192.168.1.187:30800/hello
-curl http://192.168.1.187:30800/fibonacci/42
+# Hit the live endpoint (via VIP, dell, or k8plus)
+curl http://192.168.1.200/hello
+curl http://192.168.1.242:30800/fibonacci/42
+curl http://192.168.1.171:30800/hello
+
+# Verify ArgoCD access
+curl -I https://argo.voloshko.org/
 ```
