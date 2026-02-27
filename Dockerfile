@@ -14,10 +14,7 @@ COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/cc-debian12
 
 WORKDIR /app
 COPY --from=builder /app/target/release/argo-rust .
