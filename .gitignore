@@ -1,1 +1,7 @@
 /target
+
+# OpenTofu / Terraform
+tofu/.terraform/
+tofu/terraform.tfstate
+tofu/terraform.tfstate.backup
+tofu/*.tfplan
