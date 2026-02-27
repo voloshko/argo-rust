@@ -41,6 +41,115 @@ argo-rust/
 
 ---
 
+## Codex code review
+
+**File**: `.github/workflows/codex-review.yml`
+**Trigger**: pull requests opened, updated, or reopened against `master`, `main`, or `develop`
+
+The workflow runs a static analysis pass over every PR and posts the findings as a comment, then sets a commit status (`codex-review`) so the result is visible in the PR checks bar.
+
+### How it works
+
+```
+PR opened / updated
+        │
+        ▼
+1. Checkout with full history (fetch-depth: 0)
+        │
+        ▼
+2. Get changed files
+   git diff origin/<base>...<sha>
+   filter: .rs .go .js .ts .py .java .cpp .c .cs .rb .php
+        │
+        ▼
+3. Build diff → pr_diff.txt
+        │
+        ▼
+4. Run .github/scripts/codex-review.py
+   --diff pr_diff.txt --format json --output codex-review.json
+        │
+        ▼
+5. Post / update PR comment  ── "🔍 Codex Code Review"
+        │
+        ▼
+6. Set commit status
+   success / failure / warning  (based on issue severity)
+```
+
+### Permissions
+
+```yaml
+permissions:
+  pull-requests: write   # post and update the review comment
+  contents: read         # checkout and read the diff
+```
+
+No extra secrets needed — the workflow uses the built-in `GITHUB_TOKEN`.
+
+### Review script — `.github/scripts/codex-review.py`
+
+A self-contained Python 3 script with no dependencies. It parses the unified diff, walks added lines (`+` prefix) only, and runs regex patterns per language.
+
+**Rust checks**
+
+| Category | Pattern | Message |
+|----------|---------|---------|
+| best_practices | `unwrap()` | Use proper error handling instead of unwrap() |
+| best_practices | `println!` | Prefer logging over println! for production code |
+| best_practices | `Vec::new().push(` | Use Vec::with_capacity() when size is known |
+| best_practices | `.clone()` | Avoid unnecessary clones, consider references |
+| bugs | `panic!` | Avoid panic! in production code, use Result<T,E> |
+| bugs | `expect(` | Replace expect() with proper error handling |
+| bugs | `unsafe ` | Unsafe block detected — ensure it's necessary and safe |
+| security | `println!(…password` | Don't log passwords or sensitive data |
+| security | `dbg!(…password` | Don't include passwords in debug output |
+
+**Go checks** cover `fmt.Print*`, `defer` without error handling, and password leaks in formatted strings.
+
+### Comment format
+
+The bot posts a markdown table grouped by severity and updates the same comment on subsequent pushes (searches for an existing comment from `type=Bot` containing `🔍 Codex Code Review`).
+
+```
+## 🔍 Codex Code Review
+
+Repository: voloshko/argo-rust
+PR: #N
+Commit: `sha`
+
+### 📋 Review Summary
+
+| Severity | Category      | File        | Line | Issue                              |
+|----------|---------------|-------------|------|------------------------------------|
+| warning  | best_practices| src/main.rs | 12   | Consider using proper error handling |
+```
+
+### Commit status
+
+After the review, a commit status named `codex-review` is written:
+
+| Issues found | Status | Description |
+|---|---|---|
+| Any `error` severity | `failure` | Critical issues found |
+| Any `warning`, no errors | `warning` | Warnings found |
+| None | `success` | No issues found |
+
+### Customising checks with AGENTS.md
+
+Place an `AGENTS.md` at the repo root (or deeper for per-package rules) with a `## Review guidelines` section:
+
+```markdown
+## Review guidelines
+
+- Do not log PII or tokens at any log level.
+- Every HTTP handler must be wrapped by the auth middleware.
+- Flag all bare unwrap() calls in src/ as errors, not warnings.
+```
+
+Codex reads the `AGENTS.md` closest to each changed file. More-specific files deeper in the tree override the root one for their subtree.
+
+---
+
 ## GitHub Actions pipeline
 
 **File**: `.github/workflows/deploy.yml`
